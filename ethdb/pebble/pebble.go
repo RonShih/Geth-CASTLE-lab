@@ -376,7 +376,10 @@ func (d *Database) Has(key []byte) (bool, error) {
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
-	_, closer, err := d.db.Get(key)
+
+	// CASTLE
+	_, _, _, closer, err := d.db.GetWithMetadata(key)
+
 	if err == pebble.ErrNotFound {
 		return false, nil
 	} else if err != nil {
@@ -395,10 +398,19 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	if d.closed {
 		return nil, pebble.ErrClosed
 	}
-	dat, closer, err := d.db.Get(key)
+
+	// CASTLE
+	dat, level, sstable, closer, err := d.db.GetWithMetadata(key)
+
 	if err != nil {
 		return nil, err
 	}
+
+	// Log with all metadata combined
+	s := fmt.Sprintf("OPType: Get, key: %x, size: %d, level: %d, sstable: %d",
+		key, len(key), level, sstable)
+	common.WriteGlobalLog(s)
+
 	ret := make([]byte, len(dat))
 	copy(ret, dat)
 	if err = closer.Close(); err != nil {

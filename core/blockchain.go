@@ -1935,6 +1935,18 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool, makeWitness 
 			log.Debug("Abort during block processing")
 			break
 		}
+		// Tino: stop chain manually if reach the target block number
+		targetStartBlockNumber := common.GetTargetStartBlockNumber()
+		targetEndBlockNumber := common.GetTargetEndBlockNumber()
+		currentBlockNumer := block.Number().Uint64()
+		fmt.Println("<currentBlockNumber, targetStartBlockNumber, targetEndBlockNumber>", currentBlockNumer, targetStartBlockNumber, targetEndBlockNumber)
+		if currentBlockNumer >= targetStartBlockNumber {
+			common.SetEnableGlobalLog(true)
+		}
+		if currentBlockNumer >= targetEndBlockNumber {
+			log.Warn("Block import terminated due to reach the target", "number", block.Number(), "hash", block.Hash())
+			common.StopChainManually()
+		}
 		// If the block is known (in the middle of the chain), it's a special case for
 		// Clique blocks where they can share state among each other, so importing an
 		// older block might complete the state of the subsequent one. In this case,
@@ -2174,6 +2186,8 @@ func (bc *BlockChain) ProcessBlock(parentRoot common.Hash, block *types.Block, s
 		}()
 	}
 
+	// Tino: Output the block number and block hash for tracing
+	common.WriteGlobalLog("Processing block (start), ID: " + block.Number().String() + ", hash: " + block.Hash().String())
 	// Process block using the parent state as reference point
 	pstart := time.Now()
 	res, err := bc.processor.Process(block, statedb, bc.cfg.VmConfig)
@@ -2275,6 +2289,8 @@ func (bc *BlockChain) ProcessBlock(parentRoot common.Hash, block *types.Block, s
 	stats.TotalTime = elapsed
 	stats.MgasPerSecond = float64(res.GasUsed) * 1000 / float64(elapsed)
 
+	// Tino: Output the block number and block hash for tracing
+	common.WriteGlobalLog("Processing block (end), ID: " + block.Number().String() + ", hash: " + block.Hash().String())
 	return &blockProcessingResult{
 		usedGas:  res.GasUsed,
 		procTime: proctime,

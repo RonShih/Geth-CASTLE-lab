@@ -285,6 +285,12 @@ func init() {
 }
 
 func main() {
+	// Tino: Open the global logger for trace collection
+	if !common.InitGlobalLog() {
+		fmt.Println("Error opening global log file")
+		os.Exit(1)
+	}
+	defer common.CloseGlobalLog()
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

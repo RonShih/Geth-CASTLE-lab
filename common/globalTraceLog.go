@@ -11,9 +11,9 @@ import (
 // Tino: global logger for trace collection
 var gethLogger *syslog.Logger
 var logFile *os.File
-var targetStartBlockNumber uint64 = 10 // The start block number for trace collection
-var targetEndBlockNumber uint64 = 20   // The end block number for trace collection
-var shouldGlobalLogInUse bool = false  // Flag to enable or disable global logging, it will be set to true when the target start block number is reached
+var targetStartBlockNumber uint64 = 1    // The start block number for trace collection
+var targetEndBlockNumber uint64 = 100000 // The end block number for trace collection
+var shouldGlobalLogInUse bool = false    // Flag to enable or disable global logging, it will be set to true when the target start block number is reached
 
 var logIsInitiated bool = false
 

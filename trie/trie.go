@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
+	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -99,7 +101,7 @@ func New(id *ID, db database.NodeDatabase) (*Trie, error) {
 		prevalueTracer: NewPrevalueTracer(),
 	}
 	if id.Root != (common.Hash{}) && id.Root != types.EmptyRootHash {
-		rootnode, err := trie.resolveAndTrack(id.Root[:], nil)
+		rootnode, err := trie.resolveAndTrack(id.Root[:], nil, -1)
 		if err != nil {
 			return nil, err
 		}
@@ -192,10 +194,21 @@ func (t *Trie) Get(key []byte) ([]byte, error) {
 func (t *Trie) get(origNode node, key []byte, pos int) (value []byte, newnode node, didResolve bool, err error) {
 	switch n := (origNode).(type) {
 	case nil:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedNil[common.TrieOpGet], 1)
+		}
 		return nil, nil, false, nil
 	case valueNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedValue[common.TrieOpGet], 1)
+			atomic.AddInt64(&common.TrieTraversedValueBytes[common.TrieOpGet], int64(len(n)))
+		}
 		return n, n, false, nil
 	case *shortNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedShort[common.TrieOpGet], 1)
+			atomic.AddInt64(&common.TrieTraversedShortBytes[common.TrieOpGet], int64(len(n.Key)))
+		}
 		if !bytes.HasPrefix(key[pos:], n.Key) {
 			// key not found in trie
 			return nil, n, false, nil
@@ -206,13 +219,20 @@ func (t *Trie) get(origNode node, key []byte, pos int) (value []byte, newnode no
 		}
 		return value, n, didResolve, err
 	case *fullNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedFull[common.TrieOpGet], 1)
+			atomic.AddInt64(&common.TrieTraversedFullBytes[common.TrieOpGet], int64(unsafe.Sizeof(n.Children[key[pos]])))
+		}
 		value, newnode, didResolve, err = t.get(n.Children[key[pos]], key, pos+1)
 		if err == nil && didResolve {
 			n.Children[key[pos]] = newnode
 		}
 		return value, n, didResolve, err
 	case hashNode:
-		child, err := t.resolveAndTrack(n, key[:pos])
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedHash[common.TrieOpGet], 1)
+		}
+		child, err := t.resolveAndTrack(n, key[:pos], common.TrieOpGet)
 		if err != nil {
 			return nil, n, true, err
 		}
@@ -323,10 +343,18 @@ func (t *Trie) getNode(origNode node, path []byte, pos int) (item []byte, newnod
 	// Path still needs to be traversed, descend into children
 	switch n := (origNode).(type) {
 	case valueNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedValue[common.TrieOpGetNode], 1)
+			atomic.AddInt64(&common.TrieTraversedValueBytes[common.TrieOpGetNode], int64(len(n)))
+		}
 		// Path prematurely ended, abort
 		return nil, nil, 0, nil
 
 	case *shortNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedShort[common.TrieOpGetNode], 1)
+			atomic.AddInt64(&common.TrieTraversedShortBytes[common.TrieOpGetNode], int64(len(n.Key)))
+		}
 		if !bytes.HasPrefix(path[pos:], n.Key) {
 			// Path branches off from short node
 			return nil, n, 0, nil
@@ -338,6 +366,10 @@ func (t *Trie) getNode(origNode node, path []byte, pos int) (item []byte, newnod
 		return item, n, resolved, err
 
 	case *fullNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedFull[common.TrieOpGetNode], 1)
+			atomic.AddInt64(&common.TrieTraversedFullBytes[common.TrieOpGetNode], int64(unsafe.Sizeof(n.Children[path[pos]])))
+		}
 		item, newnode, resolved, err = t.getNode(n.Children[path[pos]], path, pos+1)
 		if err == nil && resolved > 0 {
 			n.Children[path[pos]] = newnode
@@ -345,7 +377,10 @@ func (t *Trie) getNode(origNode node, path []byte, pos int) (item []byte, newnod
 		return item, n, resolved, err
 
 	case hashNode:
-		child, err := t.resolveAndTrack(n, path[:pos])
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedHash[common.TrieOpGetNode], 1)
+		}
+		child, err := t.resolveAndTrack(n, path[:pos], common.TrieOpGetNode)
 		if err != nil {
 			return nil, n, 1, err
 		}
@@ -411,6 +446,10 @@ func (t *Trie) insert(n node, prefix, key []byte, value node) (bool, node, error
 	}
 	switch n := n.(type) {
 	case *shortNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedShort[common.TrieOpInsert], 1)
+			atomic.AddInt64(&common.TrieTraversedShortBytes[common.TrieOpInsert], int64(len(n.Key)))
+		}
 		matchlen := prefixLen(key, n.Key)
 		// If the whole key matches, keep this short node as is
 		// and only update the value.
@@ -445,6 +484,10 @@ func (t *Trie) insert(n node, prefix, key []byte, value node) (bool, node, error
 		return true, &shortNode{key[:matchlen], branch, t.newFlag()}, nil
 
 	case *fullNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedFull[common.TrieOpInsert], 1)
+			atomic.AddInt64(&common.TrieTraversedFullBytes[common.TrieOpInsert], int64(unsafe.Sizeof(n.Children[key[0]])))
+		}
 		dirty, nn, err := t.insert(n.Children[key[0]], append(prefix, key[0]), key[1:], value)
 		if !dirty || err != nil {
 			return false, n, err
@@ -454,6 +497,9 @@ func (t *Trie) insert(n node, prefix, key []byte, value node) (bool, node, error
 		return true, n, nil
 
 	case nil:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedNil[common.TrieOpInsert], 1)
+		}
 		// New short node is created and track it in the tracer. The node identifier
 		// passed is the path from the root node. Note the valueNode won't be tracked
 		// since it's always embedded in its parent.
@@ -462,10 +508,13 @@ func (t *Trie) insert(n node, prefix, key []byte, value node) (bool, node, error
 		return true, &shortNode{key, value, t.newFlag()}, nil
 
 	case hashNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedHash[common.TrieOpInsert], 1)
+		}
 		// We've hit a part of the trie that isn't loaded yet. Load
 		// the node and insert into it. This leaves all child nodes on
 		// the path to the value in the trie.
-		rn, err := t.resolveAndTrack(n, prefix)
+		rn, err := t.resolveAndTrack(n, prefix, common.TrieOpInsert)
 		if err != nil {
 			return false, nil, err
 		}
@@ -514,6 +563,10 @@ func (t *Trie) Delete(key []byte) error {
 func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 	switch n := n.(type) {
 	case *shortNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedShort[common.TrieOpDelete], 1)
+			atomic.AddInt64(&common.TrieTraversedShortBytes[common.TrieOpDelete], int64(len(n.Key)))
+		}
 		matchlen := prefixLen(key, n.Key)
 		if matchlen < len(n.Key) {
 			return false, n, nil // don't replace n on mismatch
@@ -552,6 +605,10 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 		}
 
 	case *fullNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedFull[common.TrieOpDelete], 1)
+			atomic.AddInt64(&common.TrieTraversedFullBytes[common.TrieOpDelete], int64(unsafe.Sizeof(n.Children[key[0]])))
+		}
 		dirty, nn, err := t.delete(n.Children[key[0]], append(prefix, key[0]), key[1:])
 		if !dirty || err != nil {
 			return false, n, err
@@ -595,7 +652,7 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 				// shortNode{..., shortNode{...}}.  Since the entry
 				// might not be loaded yet, resolve it just for this
 				// check.
-				cnode, err := t.resolve(n.Children[pos], append(prefix, byte(pos)))
+				cnode, err := t.resolve(n.Children[pos], append(prefix, byte(pos)), common.TrieOpDelete)
 				if err != nil {
 					return false, nil, err
 				}
@@ -617,16 +674,26 @@ func (t *Trie) delete(n node, prefix, key []byte) (bool, node, error) {
 		return true, n, nil
 
 	case valueNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedValue[common.TrieOpDelete], 1)
+			atomic.AddInt64(&common.TrieTraversedValueBytes[common.TrieOpDelete], int64(len(n)))
+		}
 		return true, nil, nil
 
 	case nil:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedNil[common.TrieOpDelete], 1)
+		}
 		return false, nil, nil
 
 	case hashNode:
+		if common.IsGlobalLogEnabled() { // CASTLE
+			atomic.AddInt64(&common.TrieTraversedHash[common.TrieOpDelete], 1)
+		}
 		// We've hit a part of the trie that isn't loaded yet. Load
 		// the node and delete from it. This leaves all child nodes on
 		// the path to the value in the trie.
-		rn, err := t.resolveAndTrack(n, prefix)
+		rn, err := t.resolveAndTrack(n, prefix, common.TrieOpDelete)
 		if err != nil {
 			return false, nil, err
 		}
@@ -671,9 +738,9 @@ func copyNode(n node) node {
 	}
 }
 
-func (t *Trie) resolve(n node, prefix []byte) (node, error) {
+func (t *Trie) resolve(n node, prefix []byte, op int) (node, error) {
 	if n, ok := n.(hashNode); ok {
-		return t.resolveAndTrack(n, prefix)
+		return t.resolveAndTrack(n, prefix, op)
 	}
 	return n, nil
 }
@@ -682,7 +749,7 @@ func (t *Trie) resolve(n node, prefix []byte) (node, error) {
 // and path prefix and also tracks the loaded node blob in tracer treated as the
 // node's original value. The rlp-encoded blob is preferred to be loaded from
 // database because it's easy to decode node while complex to encode node to blob.
-func (t *Trie) resolveAndTrack(n hashNode, prefix []byte) (node, error) {
+func (t *Trie) resolveAndTrack(n hashNode, prefix []byte, op int) (node, error) {
 	blob, err := t.reader.Node(prefix, common.BytesToHash(n))
 	if err != nil {
 		return nil, err
@@ -691,7 +758,23 @@ func (t *Trie) resolveAndTrack(n hashNode, prefix []byte) (node, error) {
 
 	// The returned node blob won't be changed afterward. No need to
 	// deep-copy the slice.
-	return decodeNodeUnsafe(n, blob)
+	decoded, err := decodeNodeUnsafe(n, blob)
+	if err != nil {
+		return nil, err
+	}
+	// CASTLE: Track resolved node type and blob size
+	if op >= 0 && common.IsGlobalLogEnabled() {
+		atomic.AddInt64(&common.TrieTraversedHashBytes[op], int64(len(blob)))
+		switch decoded.(type) {
+		case *shortNode:
+			atomic.AddInt64(&common.TrieResolvedShortCount[op], 1)
+			atomic.AddInt64(&common.TrieResolvedShortBytes[op], int64(len(blob)))
+		case *fullNode:
+			atomic.AddInt64(&common.TrieResolvedFullCount[op], 1)
+			atomic.AddInt64(&common.TrieResolvedFullBytes[op], int64(len(blob)))
+		}
+	}
+	return decoded, nil
 }
 
 // deletedNodes returns a list of node paths, referring the nodes being deleted

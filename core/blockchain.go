@@ -2289,6 +2289,9 @@ func (bc *BlockChain) ProcessBlock(parentRoot common.Hash, block *types.Block, s
 	stats.TotalTime = elapsed
 	stats.MgasPerSecond = float64(res.GasUsed) * 1000 / float64(elapsed)
 
+	// CASTLE: Flush trie node type stats for this block
+	common.FlushTrieNodeStats(block.Number().String())
+
 	// Tino: Output the block number and block hash for tracing
 	common.WriteGlobalLog("Processing block (end), ID: " + block.Number().String() + ", hash: " + block.Hash().String())
 	return &blockProcessingResult{

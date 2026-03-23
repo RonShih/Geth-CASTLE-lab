@@ -32,6 +32,8 @@ elif [ "$ShouldInstall" == "build" ]; then
     # for correlation
     go build -o bin/collectCorrelation collectCorrelation.go
     go build -o bin/analysisCorrelation analysisCorrelation.go
+    # for read amplification analysis
+    go build -o bin/analysisReadAmplification CASTLE/analysisReadAmplification.go
 else
     echo "Usage: $0 install|build"
     echo "  install: Install the required Go modules and build the analysis tools."

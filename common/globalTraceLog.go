@@ -15,9 +15,9 @@ import (
 // Tino: global logger for trace collection
 var gethLogger *syslog.Logger
 var logFile *os.File
-var targetStartBlockNumber uint64 = 11351600 // The start block number for trace collection
-var targetEndBlockNumber uint64 = 11351800   // The end block number for trace collection
-var shouldGlobalLogInUse bool = false        // Flag to enable or disable global logging, it will be set to true when the target start block number is reached
+var targetStartBlockNumber uint64 = 1001 // The start block number for trace collection
+var targetEndBlockNumber uint64 = 10000  // The end block number for trace collection
+var shouldGlobalLogInUse bool = false   // Flag to enable or disable global logging, it will be set to true when the target start block number is reached
 
 var logIsInitiated bool = false
 
@@ -52,6 +52,9 @@ var TrieTraversedShortBytes [TrieOpCount]int64 // len(n.Key): key bytes compared
 var TrieTraversedFullBytes [TrieOpCount]int64  // unsafe.Sizeof(n.Children[key[pos]]): one interface slot (16 bytes)
 var TrieTraversedValueBytes [TrieOpCount]int64 // len(n): value bytes returned/examined
 var TrieTraversedHashBytes [TrieOpCount]int64  // len(blob): RLP blob size from resolveAndTrack (disk I/O)
+
+// CASTLE: Independent CSV file for execute stats timing
+var executeStatsFile *os.File
 
 // CASTLE: Independent CSV file for trie node stats
 var trieStatsFile *os.File
@@ -123,6 +126,17 @@ func InitGlobalLog() bool {
 	logIsInitiated = true
 	WriteGlobalLog("Global log file opened successfully")
 
+	// CASTLE: Open independent CSV file for execute stats timing
+	execStatsFileName := fmt.Sprintf("./execute_stats_%d_%d_%s.csv", targetStartBlockNumber, targetEndBlockNumber, currentLogTime)
+	execStatsF, execStatsErr := os.OpenFile(execStatsFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+	if execStatsErr != nil {
+		fmt.Println("Error opening execute stats CSV file:", execStatsErr)
+	} else {
+		executeStatsFile = execStatsF
+		fmt.Fprintln(executeStatsFile, "block_id,execution_us,account_reads_us,storage_reads_us,code_reads_us,ptime_us,validation_us,account_hashes_us,account_updates_us,storage_updates_us,vtime_us,account_commits_us,storage_commits_us,snapshot_commit_us,triedb_commit_us,block_write_us,wtime_us,total_time_us")
+		fmt.Println("Execute stats CSV file opened:", execStatsFileName)
+	}
+
 	// CASTLE: Open independent CSV file for trie node stats
 	csvFileName := fmt.Sprintf("./trie_node_stats_%d_%d_%s.csv", targetStartBlockNumber, targetEndBlockNumber, currentLogTime)
 	csvFile, csvErr := os.OpenFile(csvFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
@@ -179,6 +193,26 @@ func FlushTrieNodeStats(blockID string) {
 	}
 }
 
+// CASTLE: FlushExecuteStats writes one CSV row with per-block timing breakdown (in microseconds).
+// The columns follow the insertChain flow: processing → validation → write → total.
+func FlushExecuteStats(blockID string,
+	execution, accountReads, storageReads, codeReads, ptime time.Duration,
+	validation, accountHashes, accountUpdates, storageUpdates, vtime time.Duration,
+	accountCommits, storageCommits, snapshotCommit, trieDBCommit, blockWrite, wtime time.Duration,
+	totalTime time.Duration,
+) {
+	if !shouldGlobalLogInUse || executeStatsFile == nil {
+		return
+	}
+	fmt.Fprintf(executeStatsFile, "%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+		blockID,
+		execution.Microseconds(), accountReads.Microseconds(), storageReads.Microseconds(), codeReads.Microseconds(), ptime.Microseconds(),
+		validation.Microseconds(), accountHashes.Microseconds(), accountUpdates.Microseconds(), storageUpdates.Microseconds(), vtime.Microseconds(),
+		accountCommits.Microseconds(), storageCommits.Microseconds(), snapshotCommit.Microseconds(), trieDBCommit.Microseconds(), blockWrite.Microseconds(), wtime.Microseconds(),
+		totalTime.Microseconds(),
+	)
+}
+
 func CloseGlobalLog() {
 	// CASTLE: Write TOTAL rows (one per op) and close trie stats CSV
 	if trieStatsFile != nil {
@@ -217,6 +251,12 @@ func CloseGlobalLog() {
 
 		trieStatsFile.Close()
 		fmt.Println("Trie node stats CSV file closed")
+	}
+
+	// CASTLE: Close execute stats CSV
+	if executeStatsFile != nil {
+		executeStatsFile.Close()
+		fmt.Println("Execute stats CSV file closed")
 	}
 
 	if logFile != nil {

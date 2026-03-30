@@ -1943,9 +1943,10 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool, makeWitness 
 		if currentBlockNumer >= targetStartBlockNumber {
 			common.SetEnableGlobalLog(true)
 		}
-		if currentBlockNumer >= targetEndBlockNumber {
+		if currentBlockNumer > targetEndBlockNumber {
 			log.Warn("Block import terminated due to reach the target", "number", block.Number(), "hash", block.Hash())
 			common.StopChainManually()
+			break
 		}
 		// If the block is known (in the middle of the chain), it's a special case for
 		// Clique blocks where they can share state among each other, so importing an
@@ -2288,6 +2289,15 @@ func (bc *BlockChain) ProcessBlock(parentRoot common.Hash, block *types.Block, s
 	elapsed := time.Since(startTime) + 1 // prevent zero division
 	stats.TotalTime = elapsed
 	stats.MgasPerSecond = float64(res.GasUsed) * 1000 / float64(elapsed)
+
+	// CASTLE: Flush execute stats timing for this block
+	wtime := time.Since(wstart)
+	common.FlushExecuteStats(block.Number().String(),
+		stats.Execution, stats.AccountReads, stats.StorageReads, stats.CodeReads, ptime,
+		stats.Validation, stats.AccountHashes, stats.AccountUpdates, stats.StorageUpdates, vtime,
+		stats.AccountCommits, stats.StorageCommits, stats.SnapshotCommit, stats.TrieDBCommit, stats.BlockWrite, wtime,
+		stats.TotalTime,
+	)
 
 	// CASTLE: Flush trie node type stats for this block
 	common.FlushTrieNodeStats(block.Number().String())

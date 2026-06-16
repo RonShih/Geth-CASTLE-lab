@@ -18,6 +18,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -375,6 +376,9 @@ func (sf *subfetcher) openTrie() error {
 func (sf *subfetcher) loop() {
 	// No matter how the loop stops, signal anyone waiting that it's terminated
 	defer close(sf.term)
+
+	// CASTLE: log prefetcher goroutine ID for cross-referencing with PebbleDB traces
+	common.WriteGlobalLog(fmt.Sprintf("PREFETCHER_START gid: %d, owner: %x, root: %x", common.GoroutineID(), sf.owner, sf.root))
 
 	if err := sf.openTrie(); err != nil {
 		return

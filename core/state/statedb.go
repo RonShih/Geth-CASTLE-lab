@@ -209,6 +209,13 @@ func (s *StateDB) StartPrefetcher(namespace string, witness *stateless.Witness, 
 	s.witness = witness
 	s.witnessStats = witnessStats
 
+	// CASTLE: Skip trie prefetcher entirely to measure I/O contention impact.
+	// When this is enabled, commit phase will be slower (cold trie nodes),
+	// but execution phase should be faster (no disk I/O contention).
+	//if common.IsGlobalLogEnabled() {
+	//	return
+	//}
+
 	// With the switch to the Proof-of-Stake consensus algorithm, block production
 	// rewards are now handled at the consensus layer. Consequently, a block may
 	// have no state transitions if it contains no transactions and no withdrawals.

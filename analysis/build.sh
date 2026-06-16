@@ -32,13 +32,13 @@ elif [ "$ShouldInstall" == "build" ]; then
     # for correlation
     go build -o bin/collectCorrelation collectCorrelation.go
     go build -o bin/analysisCorrelation analysisCorrelation.go
-    # for read amplification analysis
-    go build -o bin/analysisReadAmplification CASTLE/analysisReadAmplification.go
+    # trie-traversal stage 1: optrace_* -> trie_traversal_optrace.csv
+    go build -o bin/analysisReadAmplification CASTLE/code_optrace_analysis/analysis_optrace.go
+    # trie-traversal stage 2: trie_traversal_optrace.csv -> read_ops_analyzed.csv
+    go build -o bin/analysisTrieTraversalOptrace CASTLE/code_trie_traversal_optrace_analysis/analysis_trie_traversal_optrace.go
 else
     echo "Usage: $0 install|build"
     echo "  install: Install the required Go modules and build the analysis tools."
     echo "  build: Build the analysis tools without installing modules."
     exit 1
 fi
-
-

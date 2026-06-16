@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/lru"
@@ -468,8 +469,20 @@ func newMultiStateReader(readers ...StateReader) (*multiStateReader, error) {
 func (r *multiStateReader) Account(addr common.Address) (*types.StateAccount, error) {
 	var errs []error
 	for _, reader := range r.readers {
+		start := time.Now()
 		acct, err := reader.Account(addr)
 		if err == nil {
+			// CASTLE: track read source (snapshot vs trie) by reader type
+			if common.IsGlobalLogEnabled() {
+				elapsed := time.Since(start).Nanoseconds()
+				if _, isFlat := reader.(*flatReader); isFlat {
+					atomic.AddInt64(&common.SnapAccountHitCount, 1)
+					atomic.AddInt64(&common.SnapAccountTimeNs, elapsed)
+				} else {
+					atomic.AddInt64(&common.TrieAccountHitCount, 1)
+					atomic.AddInt64(&common.TrieAccountTimeNs, elapsed)
+				}
+			}
 			return acct, nil
 		}
 		errs = append(errs, err)
@@ -486,8 +499,20 @@ func (r *multiStateReader) Account(addr common.Address) (*types.StateAccount, er
 func (r *multiStateReader) Storage(addr common.Address, slot common.Hash) (common.Hash, error) {
 	var errs []error
 	for _, reader := range r.readers {
+		start := time.Now()
 		slot, err := reader.Storage(addr, slot)
 		if err == nil {
+			// CASTLE: track read source (snapshot vs trie) by reader type
+			if common.IsGlobalLogEnabled() {
+				elapsed := time.Since(start).Nanoseconds()
+				if _, isFlat := reader.(*flatReader); isFlat {
+					atomic.AddInt64(&common.SnapStorageHitCount, 1)
+					atomic.AddInt64(&common.SnapStorageTimeNs, elapsed)
+				} else {
+					atomic.AddInt64(&common.TrieStorageHitCount, 1)
+					atomic.AddInt64(&common.TrieStorageTimeNs, elapsed)
+				}
+			}
 			return slot, nil
 		}
 		errs = append(errs, err)

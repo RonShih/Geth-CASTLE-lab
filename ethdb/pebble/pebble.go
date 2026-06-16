@@ -28,6 +28,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
+	"github.com/cockroachdb/pebble/sstable" // CASTLE: for sstable.CastleProbeEvent in probe recorder
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
@@ -310,6 +311,25 @@ func New(file string, cache int, handles int, namespace string, readonly bool) (
 	opt.Experimental.L0CompactionConcurrency = 1
 	opt.Experimental.CompactionDebtConcurrency = 1 << 28 // 256MB
 
+	// CASTLE: Emit one SSTableProbe trace line per candidate SSTable touched by a
+	// Get. The Get summary line is still emitted by the existing castle_trace
+	// patches in pebble.Database.Get; downstream parsers join probes to their Get
+	// by (gid, key) within the same goroutine. The recorder is a no-op when
+	// global tracing is disabled, so this is safe to leave wired in always.
+	opt.CastleProbeRecorder = func(e sstable.CastleProbeEvent) {
+		if !common.IsGlobalLogEnabled() {
+			return
+		}
+		common.WriteGlobalLog(fmt.Sprintf(
+			"OPType: SSTableProbe, key: %x, level: %d, sstable: %d, "+
+				"filterPresent: %v, filterChecked: %v, filterCacheHit: %s, filterPositive: %s, "+
+				"indexCacheHit: %s, dataCacheHit: %s, found: %v, latencyNs: %d, gid: %d",
+			e.Key, e.Level, e.SSTable,
+			e.FilterPresent, e.FilterChecked, e.FilterCacheHit, e.FilterPositive,
+			e.IndexCacheHit, e.DataCacheHit, e.Found, e.LatencyNs, common.GoroutineID(),
+		))
+	}
+
 	// Open the db and recover any potential corruptions
 	innerDB, err := pebble.Open(file, opt)
 	if err != nil {
@@ -373,15 +393,18 @@ func (d *Database) Close() error {
 // Has retrieves if a key is present in the key-value store.
 func (d *Database) Has(key []byte) (bool, error) {
 	d.quitLock.RLock()
-	s := fmt.Sprintf("OPType: Has, key: %x, size: %d", key, len(key))
-	common.WriteGlobalLog(s)
 	defer d.quitLock.RUnlock()
 	if d.closed {
 		return false, pebble.ErrClosed
 	}
 
 	// CASTLE
-	_, _, _, closer, err := d.db.GetWithMetadata(key)
+	startTime := time.Now()
+	_, _, closer, err := d.db.GetWithMetadata(key)
+	latency := time.Since(startTime)
+
+	s := fmt.Sprintf("OPType: Has, key: %x, size: %d, latencyNs: %d, gid: %d", key, len(key), latency.Nanoseconds(), common.GoroutineID())
+	common.WriteGlobalLog(s)
 
 	if err == pebble.ErrNotFound {
 		return false, nil
@@ -429,16 +452,18 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 	}
 
 	// CASTLE
-	dat, level, sstable, closer, err := d.db.GetWithMetadata(key)
+	startTime := time.Now()
+	dat, meta, closer, err := d.db.GetWithMetadata(key)
+	latency := time.Since(startTime)
 
 	if err != nil {
 		return nil, err
 	}
 
 	// Log with all metadata combined
-	stack := getShortCallStack(3, 250)
-	s := fmt.Sprintf("OPType: Get, key: %x, size: %d, level: %d, sstable: %d, gid: %d, stack: %s",
-		key, len(key), level, sstable, common.GoroutineID(), stack)
+	//stack := getShortCallStack(3, 32)
+	s := fmt.Sprintf("OPType: Get, key: %x, size: %d, level: %d, sstable: %d, blockOffset: %d, blockLength: %d, cacheHit: %t, latencyNs: %d, gid: %d",
+		key, len(key), meta.Level, meta.SSTable, meta.BlockOffset, meta.BlockLength, meta.CacheHit, latency.Nanoseconds(), common.GoroutineID())
 	common.WriteGlobalLog(s)
 
 	ret := make([]byte, len(dat))
@@ -453,24 +478,30 @@ func (d *Database) Get(key []byte) ([]byte, error) {
 func (d *Database) Put(key []byte, value []byte) error {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
-	s := fmt.Sprintf("OPType: Put, key: %x, size: %d, valueSize: %d, gid: %d", key, len(key), len(value), common.GoroutineID())
-	common.WriteGlobalLog(s)
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	return d.db.Set(key, value, d.writeOptions)
+	startTime := time.Now()
+	err := d.db.Set(key, value, d.writeOptions)
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: Put, key: %x, size: %d, valueSize: %d, latencyNs: %d, gid: %d", key, len(key), len(value), latency.Nanoseconds(), common.GoroutineID())
+	common.WriteGlobalLog(s)
+	return err
 }
 
 // Delete removes the key from the key-value store.
 func (d *Database) Delete(key []byte) error {
 	d.quitLock.RLock()
 	defer d.quitLock.RUnlock()
-	s := fmt.Sprintf("OPType: Delete, key: %x, size: %d, gid: %d", key, len(key), common.GoroutineID())
-	common.WriteGlobalLog(s)
 	if d.closed {
 		return pebble.ErrClosed
 	}
-	return d.db.Delete(key, d.writeOptions)
+	startTime := time.Now()
+	err := d.db.Delete(key, d.writeOptions)
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: Delete, key: %x, size: %d, latencyNs: %d, gid: %d", key, len(key), latency.Nanoseconds(), common.GoroutineID())
+	common.WriteGlobalLog(s)
+	return err
 }
 
 // DeleteRange deletes all of the keys (and values) in the range [start,end)
@@ -494,20 +525,26 @@ func (d *Database) DeleteRange(start, end []byte) error {
 // NewBatch creates a write-only key-value store that buffers changes to its host
 // database until a final write is called.
 func (d *Database) NewBatch() ethdb.Batch {
-	s := fmt.Sprintf("OPType: NewBatch, gid: %d", common.GoroutineID())
+	startTime := time.Now()
+	b := d.db.NewBatch()
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: NewBatch, latencyNs: %d, gid: %d", latency.Nanoseconds(), common.GoroutineID())
 	common.WriteGlobalLog(s)
 	return &batch{
-		b:  d.db.NewBatch(),
+		b:  b,
 		db: d,
 	}
 }
 
 // NewBatchWithSize creates a write-only database batch with pre-allocated buffer.
 func (d *Database) NewBatchWithSize(size int) ethdb.Batch {
-	s := fmt.Sprintf("OPType: NewBatchWithSize, size: %d, gid: %d", size, common.GoroutineID())
+	startTime := time.Now()
+	b := d.db.NewBatchWithSize(size)
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: NewBatchWithSize, size: %d, latencyNs: %d, gid: %d", size, latency.Nanoseconds(), common.GoroutineID())
 	common.WriteGlobalLog(s)
 	return &batch{
-		b:  d.db.NewBatchWithSize(size),
+		b:  b,
 		db: d,
 	}
 }
@@ -541,8 +578,12 @@ func (d *Database) Stat() (string, error) {
 // is treated as a key after all keys in the data store. If both is nil then it
 // will compact entire data store.
 func (d *Database) Compact(start []byte, limit []byte) error {
-	s := fmt.Sprintf("OPType: Compact, start key: %x, end key: %x", start, limit)
-	common.WriteGlobalLog(s)
+	startTime := time.Now()
+	defer func() {
+		latency := time.Since(startTime)
+		s := fmt.Sprintf("OPType: Compact, start key: %x, end key: %x, latencyNs: %d", start, limit, latency.Nanoseconds())
+		common.WriteGlobalLog(s)
+	}()
 	// There is no special flag to represent the end of key range
 	// in pebble(nil in leveldb). Use an ugly hack to construct a
 	// large key to represent it.
@@ -692,9 +733,12 @@ type batch struct {
 
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(key, value []byte) error {
-	s := fmt.Sprintf("OPType: BatchPut, key: %x, size: %d, valueSize: %d, gid: %d", key, len(key), len(value), common.GoroutineID())
+	startTime := time.Now()
+	err := b.b.Set(key, value, nil)
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: BatchPut, key: %x, size: %d, valueSize: %d, latencyNs: %d, gid: %d", key, len(key), len(value), latency.Nanoseconds(), common.GoroutineID())
 	common.WriteGlobalLog(s)
-	if err := b.b.Set(key, value, nil); err != nil {
+	if err != nil {
 		return err
 	}
 	b.size += len(key) + len(value)
@@ -703,9 +747,12 @@ func (b *batch) Put(key, value []byte) error {
 
 // Delete inserts the key removal into the batch for later committing.
 func (b *batch) Delete(key []byte) error {
-	s := fmt.Sprintf("OPType: BatchDelete, key: %x, size: %d, gid: %d", key, len(key), common.GoroutineID())
+	startTime := time.Now()
+	err := b.b.Delete(key, nil)
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: BatchDelete, key: %x, size: %d, latencyNs: %d, gid: %d", key, len(key), latency.Nanoseconds(), common.GoroutineID())
 	common.WriteGlobalLog(s)
-	if err := b.b.Delete(key, nil); err != nil {
+	if err != nil {
 		return err
 	}
 	b.size += len(key)
@@ -731,21 +778,27 @@ func (b *batch) DeleteRange(start, end []byte) error {
 
 // ValueSize retrieves the amount of data queued up for writing.
 func (b *batch) ValueSize() int {
-	s := fmt.Sprintf("OPType: GetBatchValueSize, size: %d, gid: %d", b.size, common.GoroutineID())
+	startTime := time.Now()
+	sz := b.size
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: GetBatchValueSize, size: %d, latencyNs: %d, gid: %d", sz, latency.Nanoseconds(), common.GoroutineID())
 	common.WriteGlobalLog(s)
-	return b.size
+	return sz
 }
 
 // Write flushes any accumulated data to disk.
 func (b *batch) Write() error {
 	b.db.quitLock.RLock()
 	defer b.db.quitLock.RUnlock()
-	s := fmt.Sprintf("OPType: BatchPutCommit, gid: %d", common.GoroutineID())
-	common.WriteGlobalLog(s)
 	if b.db.closed {
 		return pebble.ErrClosed
 	}
-	return b.b.Commit(b.db.writeOptions)
+	startTime := time.Now()
+	err := b.b.Commit(b.db.writeOptions)
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: BatchPutCommit, latencyNs: %d, gid: %d", latency.Nanoseconds(), common.GoroutineID())
+	common.WriteGlobalLog(s)
+	return err
 }
 
 // Reset resets the batch for reuse.
@@ -801,26 +854,33 @@ type pebbleIterator struct {
 // of database content with a particular key prefix, starting at a particular
 // initial key (or after, if it does not exist).
 func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	s := fmt.Sprintf("OPType: NewIterator, prefix: %x, start key: %x, gid: %d", prefix, start, common.GoroutineID())
-	common.WriteGlobalLog(s)
+	startTime := time.Now()
 	iter, _ := d.db.NewIter(&pebble.IterOptions{
 		LowerBound: append(prefix, start...),
 		UpperBound: upperBound(prefix),
 	})
 	iter.First()
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: NewIterator, prefix: %x, start key: %x, latencyNs: %d, gid: %d", prefix, start, latency.Nanoseconds(), common.GoroutineID())
+	common.WriteGlobalLog(s)
 	return &pebbleIterator{iter: iter, moved: true, released: false}
 }
 
 // Next moves the iterator to the next key/value pair. It returns whether the
 // iterator is exhausted.
 func (iter *pebbleIterator) Next() bool {
-	s := "OPType: IteratorNext"
-	common.WriteGlobalLog(s)
+	startTime := time.Now()
+	var result bool
 	if iter.moved {
 		iter.moved = false
-		return iter.iter.Valid()
+		result = iter.iter.Valid()
+	} else {
+		result = iter.iter.Next()
 	}
-	return iter.iter.Next()
+	latency := time.Since(startTime)
+	s := fmt.Sprintf("OPType: IteratorNext, latencyNs: %d", latency.Nanoseconds())
+	common.WriteGlobalLog(s)
+	return result
 }
 
 // Error returns any accumulated error. Exhausting all the key/value pairs

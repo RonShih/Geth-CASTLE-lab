@@ -15,9 +15,16 @@ import (
 // Tino: global logger for trace collection
 var gethLogger *syslog.Logger
 var logFile *os.File
-var targetStartBlockNumber uint64 = 1001 // The start block number for trace collection
-var targetEndBlockNumber uint64 = 10000  // The end block number for trace collection
-var shouldGlobalLogInUse bool = false   // Flag to enable or disable global logging, it will be set to true when the target start block number is reached
+// CASTLE: 1000-block range past current state (13M) for SSTableProbe verification.
+// Geth replays 13,000,000 → 13,001,000 with tracing fully enabled across that range,
+// then auto-stops. Restore from /mnt/d/castle_trace/state_backup_13M_2026-05-08 to
+// reset back to the clean 13M baseline after the test.
+var targetStartBlockNumber uint64 = 13000000 // The start block number for trace collection
+var targetEndBlockNumber uint64 = 13001000   // The end block number for trace collection (stop at 13M+1000)
+
+// CASTLE: Output directory for trace files (optrace, execute_stats, trie_node_stats)
+var traceOutputDir string = "/mnt/d/castle_trace"
+var shouldGlobalLogInUse bool = false // Flag to enable or disable global logging, it will be set to true when the target start block number is reached
 
 var logIsInitiated bool = false
 
@@ -52,6 +59,18 @@ var TrieTraversedShortBytes [TrieOpCount]int64 // len(n.Key): key bytes compared
 var TrieTraversedFullBytes [TrieOpCount]int64  // unsafe.Sizeof(n.Children[key[pos]]): one interface slot (16 bytes)
 var TrieTraversedValueBytes [TrieOpCount]int64 // len(n): value bytes returned/examined
 var TrieTraversedHashBytes [TrieOpCount]int64  // len(blob): RLP blob size from resolveAndTrack (disk I/O)
+
+// CASTLE: Snapshot vs Trie read source counters (per block, swapped atomically on flush)
+var SnapAccountHitCount int64
+var TrieAccountHitCount int64
+var SnapStorageHitCount int64
+var TrieStorageHitCount int64
+
+// CASTLE: Snapshot vs Trie cumulative time in nanoseconds (per block, swapped atomically on flush)
+var SnapAccountTimeNs int64
+var TrieAccountTimeNs int64
+var SnapStorageTimeNs int64
+var TrieStorageTimeNs int64
 
 // CASTLE: Independent CSV file for execute stats timing
 var executeStatsFile *os.File
@@ -111,8 +130,15 @@ func WriteGlobalLog(msg string) {
 }
 
 func InitGlobalLog() bool {
+	// CASTLE: Ensure output directory exists
+	if err := os.MkdirAll(traceOutputDir, 0755); err != nil {
+		fmt.Println("Error creating trace output directory:", err)
+		logIsInitiated = false
+		return false
+	}
+
 	currentLogTime := time.Now().Format("2006-01-02-15-04-05")
-	currentLogFileName := fmt.Sprintf("./blktrace_%d_%d_%s", targetStartBlockNumber, targetEndBlockNumber, currentLogTime)
+	currentLogFileName := fmt.Sprintf("%s/optrace_%d_%d_%s", traceOutputDir, targetStartBlockNumber, targetEndBlockNumber, currentLogTime)
 
 	file, err := os.OpenFile(currentLogFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
 	if err != nil {
@@ -127,18 +153,18 @@ func InitGlobalLog() bool {
 	WriteGlobalLog("Global log file opened successfully")
 
 	// CASTLE: Open independent CSV file for execute stats timing
-	execStatsFileName := fmt.Sprintf("./execute_stats_%d_%d_%s.csv", targetStartBlockNumber, targetEndBlockNumber, currentLogTime)
+	execStatsFileName := fmt.Sprintf("%s/execute_stats_%d_%d_%s.csv", traceOutputDir, targetStartBlockNumber, targetEndBlockNumber, currentLogTime)
 	execStatsF, execStatsErr := os.OpenFile(execStatsFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
 	if execStatsErr != nil {
 		fmt.Println("Error opening execute stats CSV file:", execStatsErr)
 	} else {
 		executeStatsFile = execStatsF
-		fmt.Fprintln(executeStatsFile, "block_id,execution_us,account_reads_us,storage_reads_us,code_reads_us,ptime_us,validation_us,account_hashes_us,account_updates_us,storage_updates_us,vtime_us,account_commits_us,storage_commits_us,snapshot_commit_us,triedb_commit_us,block_write_us,wtime_us,total_time_us")
+		fmt.Fprintln(executeStatsFile, "block_id,execution_us,account_reads_us,storage_reads_us,code_reads_us,ptime_us,validation_us,account_hashes_us,account_updates_us,storage_updates_us,vtime_us,account_commits_us,storage_commits_us,snapshot_commit_us,triedb_commit_us,block_write_us,wtime_us,total_time_us,snap_acct_hit,trie_acct_hit,snap_stor_hit,trie_stor_hit,snap_acct_us,trie_acct_us,snap_stor_us,trie_stor_us")
 		fmt.Println("Execute stats CSV file opened:", execStatsFileName)
 	}
 
 	// CASTLE: Open independent CSV file for trie node stats
-	csvFileName := fmt.Sprintf("./trie_node_stats_%d_%d_%s.csv", targetStartBlockNumber, targetEndBlockNumber, currentLogTime)
+	csvFileName := fmt.Sprintf("%s/trie_node_stats_%d_%d_%s.csv", traceOutputDir, targetStartBlockNumber, targetEndBlockNumber, currentLogTime)
 	csvFile, csvErr := os.OpenFile(csvFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
 	if csvErr != nil {
 		fmt.Println("Error opening trie stats CSV file:", csvErr)
@@ -194,7 +220,8 @@ func FlushTrieNodeStats(blockID string) {
 }
 
 // CASTLE: FlushExecuteStats writes one CSV row with per-block timing breakdown (in microseconds).
-// The columns follow the insertChain flow: processing → validation → write → total.
+// The columns follow the insertChain flow: processing → validation → write → total,
+// plus snapshot-vs-trie read source breakdown.
 func FlushExecuteStats(blockID string,
 	execution, accountReads, storageReads, codeReads, ptime time.Duration,
 	validation, accountHashes, accountUpdates, storageUpdates, vtime time.Duration,
@@ -204,12 +231,24 @@ func FlushExecuteStats(blockID string,
 	if !shouldGlobalLogInUse || executeStatsFile == nil {
 		return
 	}
-	fmt.Fprintf(executeStatsFile, "%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+	// Swap read-source counters atomically (reset to 0 for next block)
+	snapAcctHit := atomic.SwapInt64(&SnapAccountHitCount, 0)
+	trieAcctHit := atomic.SwapInt64(&TrieAccountHitCount, 0)
+	snapStorHit := atomic.SwapInt64(&SnapStorageHitCount, 0)
+	trieStorHit := atomic.SwapInt64(&TrieStorageHitCount, 0)
+	snapAcctNs := atomic.SwapInt64(&SnapAccountTimeNs, 0)
+	trieAcctNs := atomic.SwapInt64(&TrieAccountTimeNs, 0)
+	snapStorNs := atomic.SwapInt64(&SnapStorageTimeNs, 0)
+	trieStorNs := atomic.SwapInt64(&TrieStorageTimeNs, 0)
+
+	fmt.Fprintf(executeStatsFile, "%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 		blockID,
 		execution.Microseconds(), accountReads.Microseconds(), storageReads.Microseconds(), codeReads.Microseconds(), ptime.Microseconds(),
 		validation.Microseconds(), accountHashes.Microseconds(), accountUpdates.Microseconds(), storageUpdates.Microseconds(), vtime.Microseconds(),
 		accountCommits.Microseconds(), storageCommits.Microseconds(), snapshotCommit.Microseconds(), trieDBCommit.Microseconds(), blockWrite.Microseconds(), wtime.Microseconds(),
 		totalTime.Microseconds(),
+		snapAcctHit, trieAcctHit, snapStorHit, trieStorHit,
+		snapAcctNs/1000, trieAcctNs/1000, snapStorNs/1000, trieStorNs/1000, // ns → us
 	)
 }
 
